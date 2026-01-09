@@ -21,9 +21,9 @@ import numpy as np
 from typing import Dict, Optional, Tuple, List
 
 from .geo_v4 import calculate_zone_from_distance, haversine_miles, band_lookup
-from .containers_v4 import weighted_pkg_cube
+from .containers import weighted_pkg_cube
 from .utils import safe_divide, get_facility_lookup, extract_path_nodes
-from .config_v4 import OptimizationConstants
+from .config import OptimizationConstants
 
 
 # ============================================================================
@@ -968,7 +968,7 @@ def add_zone_miles_to_od_selected(
 
 
 # ============================================================================
-# PATH STEPS (LEGACY - USED BY run_v4.py)
+# PATH STEPS (LEGACY - USED BY run.py)
 # ============================================================================
 
 def build_path_steps(

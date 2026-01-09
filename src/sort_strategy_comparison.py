@@ -10,7 +10,7 @@ import numpy as np
 from typing import Dict, Tuple, Optional
 from copy import deepcopy
 
-from .milp_v4 import solve_network_optimization
+from .milp import solve_network_optimization
 from .utils import safe_divide
 
 

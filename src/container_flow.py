@@ -21,7 +21,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Set
 from collections import defaultdict
 
-from .containers_v4 import (
+from .containers import (
     weighted_pkg_cube,
     get_raw_trailer_cube,
     get_containers_per_truck,
@@ -29,7 +29,7 @@ from .containers_v4 import (
 )
 from .geo_v4 import haversine_miles, band_lookup
 from .utils import safe_divide, get_facility_lookup, extract_path_nodes
-from .config_v4 import OptimizationConstants
+from .config import OptimizationConstants
 
 
 # ============================================================================

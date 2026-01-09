@@ -16,7 +16,7 @@ import numpy as np
 from typing import Dict, Optional, Any, List, Tuple
 from functools import lru_cache
 
-from .config_v4 import (
+from .config import (
     OptimizationConstants,
     ValidationTolerances,
 )

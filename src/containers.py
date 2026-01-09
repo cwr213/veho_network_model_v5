@@ -19,7 +19,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict
 
-from .config_v4 import OptimizationConstants
+from .config import OptimizationConstants
 from .utils import safe_divide
 
 

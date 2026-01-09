@@ -17,7 +17,7 @@ import pandas as pd
 from typing import Tuple, Optional
 from functools import lru_cache
 
-from .config_v4 import EARTH_RADIUS_MILES, OptimizationConstants
+from .config import EARTH_RADIUS_MILES, OptimizationConstants
 from .utils import get_facility_lookup
 
 
