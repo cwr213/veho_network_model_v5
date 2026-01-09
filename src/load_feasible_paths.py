@@ -113,7 +113,7 @@ def _split_flow_types(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     # Calculate combined middle-mile volume
     df["pkgs_day"] = df["pkgs_mm"].fillna(0) + df["pkgs_zs"].fillna(0)
-    df["zone"] = df["zone_mm_zs"].fillna(0).astype(int)
+    df["zone"] = df["zone"].fillna(0).astype(int)
 
     # Middle-mile: paths with pkgs_day > 0 and not direct_injection type
     # (direct_injection paths have their own handling)

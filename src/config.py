@@ -105,7 +105,7 @@ FEASIBLE_PATHS_REQUIRED_COLUMNS = [
     "pkgs_mm",
     "pkgs_zs",
     "pkgs_di",
-    "zone_mm_zs",
+    "zone",
 ]
 
 FEASIBLE_PATHS_OPTIONAL_COLUMNS = [
