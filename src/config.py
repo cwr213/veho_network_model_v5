@@ -9,6 +9,17 @@ from enum import Enum
 from typing import Optional
 
 
+# =============================================================================
+# PHYSICAL CONSTANTS
+# =============================================================================
+
+EARTH_RADIUS_MILES = 3958.8
+
+
+# =============================================================================
+# ENUMS
+# =============================================================================
+
 class LoadStrategy(Enum):
     CONTAINER = "container"
     FLUID = "fluid"
@@ -36,6 +47,10 @@ class DestSortLevel(Enum):
     SORT_GROUP = "sort_group"
 
 
+# =============================================================================
+# DATACLASSES
+# =============================================================================
+
 @dataclass
 class CostParameters:
     injection_sort_cost_per_pkg: float
@@ -53,13 +68,27 @@ class OptimizationConstants:
     NUM_SOLVER_WORKERS: int = 8
     CUBE_SCALE_FACTOR: int = 1000
     BIG_M: int = 10_000_000
+    EPSILON: float = 1e-9
 
 
-# Output file naming
+@dataclass
+class ValidationTolerances:
+    SHARE_SUM_TOLERANCE: float = 0.01
+    COST_TOLERANCE: float = 0.001
+    FILL_RATE_MAX: float = 1.0
+
+
+# =============================================================================
+# FILE TEMPLATES
+# =============================================================================
+
 OUTPUT_FILE_TEMPLATE = "network_opt_{scenario_id}_{strategy}.xlsx"
 
 
-# Required columns for feasible_paths from SLA model
+# =============================================================================
+# FEASIBLE PATHS SCHEMA
+# =============================================================================
+
 FEASIBLE_PATHS_REQUIRED_COLUMNS = [
     "scenario_id",
     "origin",
@@ -94,6 +123,10 @@ VALID_PATH_TYPES = {"direct_injection", "od_mm", "2_touch", "3_touch", "4_touch"
 VALID_SORT_LEVELS = {"region", "market", "sort_group"}
 
 
+# =============================================================================
+# PARSING HELPERS
+# =============================================================================
+
 def parse_path_type(value: str) -> PathType:
     """Parse path_type string to enum."""
     mapping = {
@@ -120,4 +153,4 @@ def parse_sort_level(value: str) -> SortLevel:
     key = str(value).strip().lower()
     if key not in mapping:
         raise ValueError(f"Invalid sort_level: {value}. Must be one of {list(mapping.keys())}")
-    return mapping[key]
+    return

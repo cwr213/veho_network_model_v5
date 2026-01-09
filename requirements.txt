@@ -1,4 +1,4 @@
-# Veho Network Optimization v4
+# Veho Network Optimization v5
 # Core dependencies for transportation network modeling
 
 # Data manipulation
@@ -7,19 +7,6 @@ numpy>=1.24.0,<2.0.0
 
 # Excel I/O
 openpyxl>=3.1.0,<4.0.0
-xlsxwriter>=3.1.0,<4.0.0
 
 # Optimization solver
 ortools>=9.7.0,<10.0.0
-
-# Progress indicator
-tqdm>=4.65.0
-
-# Optional: Configuration management (for future use)
-# pyyaml>=6.0.0,<7.0.0
-
-# Development dependencies (optional)
-# pytest>=7.4.0,<8.0.0
-# black>=23.7.0,<24.0.0
-# mypy>=1.5.0,<2.0.0
-# flake8>=6.1.0,<7.0.0
