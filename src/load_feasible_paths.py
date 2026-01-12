@@ -17,9 +17,9 @@ from .config import (
 
 
 def load_and_filter_feasible_paths(
-        feasible_paths_df: pd.DataFrame,
-        run_settings: Dict,
-        scenario_id: str
+    feasible_paths_df: pd.DataFrame,
+    run_settings: Dict,
+    scenario_id: str
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load and filter feasible paths for a specific scenario.
@@ -52,14 +52,14 @@ def load_and_filter_feasible_paths(
     # Filter by sla_met
     df = df[df["sla_met"] == True].copy()
     sla_count = len(df)
-    print(f"  After sla_met=True: {sla_count:,} paths ({sla_count / initial_count * 100:.1f}%)")
+    print(f"  After sla_met=True: {sla_count:,} paths ({sla_count/initial_count*100:.1f}%)")
 
     # Filter by uses_only_active_arcs (if required)
     allow_inactive = run_settings.get("allow_inactive_arcs", False)
     if not allow_inactive:
         df = df[df["uses_only_active_arcs"] == True].copy()
         active_count = len(df)
-        print(f"  After active_arcs filter: {active_count:,} paths ({active_count / initial_count * 100:.1f}%)")
+        print(f"  After active_arcs filter: {active_count:,} paths ({active_count/initial_count*100:.1f}%)")
 
     if df.empty:
         raise ValueError(f"No paths remain after filtering for scenario: {scenario_id}")
@@ -113,20 +113,20 @@ def _split_flow_types(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     # Calculate combined middle-mile volume
     df["pkgs_day"] = df["pkgs_mm"].fillna(0) + df["pkgs_zs"].fillna(0)
-    df["zone"] = df["zone"].fillna(0).astype(int)
+    df["zone"] = df["zone_mm_zs"].fillna(0).astype(int)
 
     # Middle-mile: paths with pkgs_day > 0 and not direct_injection type
     # (direct_injection paths have their own handling)
     middle_mile = df[
         (df["pkgs_day"] > 0) &
         (df["path_type"].str.lower() != "direct_injection")
-        ].copy()
+    ].copy()
 
     # Direct injection: either path_type is direct_injection OR pkgs_di > 0
     direct_injection = df[
         (df["path_type"].str.lower() == "direct_injection") |
         (df["pkgs_di"].fillna(0) > 0)
-        ].copy()
+    ].copy()
 
     return middle_mile, direct_injection
 
@@ -228,8 +228,8 @@ def get_unique_od_pairs(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_regional_sort_hub_constraints(
-        df: pd.DataFrame,
-        facilities: pd.DataFrame
+    df: pd.DataFrame,
+    facilities: pd.DataFrame
 ) -> Dict[Tuple[str, str], List[str]]:
     """
     Identify (hub, dest) pairs that require sort consistency constraints.

@@ -533,12 +533,9 @@ def _get_containers_per_truck(container_params: pd.DataFrame) -> int:
 def _get_raw_trailer_cube(container_params: pd.DataFrame) -> float:
     """Get raw trailer cube capacity."""
     gaylord = container_params[container_params["container_type"].str.lower() == "gaylord"].iloc[0]
-    if "trailer_air_cube_cuft" not in gaylord.index:
-        raise ValueError(
-            "container_params missing 'trailer_air_cube_cuft' column. "
-            "Required for truck fill rate calculations."
-        )
-    return float(gaylord["trailer_air_cube_cuft"])
+    if "trailer_cube_cuft" in gaylord.index:
+        return float(gaylord["trailer_cube_cuft"])
+    return 2700.0
 
 
 def _calculate_containers_per_package(package_mix: pd.DataFrame, container_params: pd.DataFrame) -> float:
