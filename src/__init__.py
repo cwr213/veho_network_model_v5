@@ -9,7 +9,6 @@ from .io_loader import load_workbook, params_to_dict
 from .validators import validate_inputs
 from .load_feasible_paths import load_and_filter_feasible_paths
 from .milp import solve_network_optimization
-from .run import main
 
 __all__ = [
     "CostParameters",
@@ -21,5 +20,4 @@ __all__ = [
     "validate_inputs",
     "load_and_filter_feasible_paths",
     "solve_network_optimization",
-    "main",
 ]

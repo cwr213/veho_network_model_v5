@@ -53,7 +53,16 @@ class OptimizationConstants:
     NUM_SOLVER_WORKERS: int = 8
     CUBE_SCALE_FACTOR: int = 1000
     BIG_M: int = 10_000_000
+    EPSILON: float = 1e-6
 
+
+@dataclass
+class ValidationTolerances:
+    SHARE_SUM_TOLERANCE: float = 0.01
+
+
+# Earth radius for distance calculations
+EARTH_RADIUS_MILES = 3958.8
 
 # Output file naming
 OUTPUT_FILE_TEMPLATE = "network_opt_{scenario_id}_{strategy}.xlsx"
@@ -76,7 +85,7 @@ FEASIBLE_PATHS_REQUIRED_COLUMNS = [
     "pkgs_mm",
     "pkgs_zs",
     "pkgs_di",
-    "zone_mm_zs",
+    "zone",
 ]
 
 FEASIBLE_PATHS_OPTIONAL_COLUMNS = [

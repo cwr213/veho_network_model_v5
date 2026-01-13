@@ -2,6 +2,9 @@
 Main Execution Script
 
 Orchestrates network optimization using pre-enumerated paths from SLA model.
+
+Usage:
+    python run.py --input input.xlsx --output_dir outputs/
 """
 
 import argparse
@@ -10,16 +13,16 @@ import pandas as pd
 from datetime import datetime
 import sys
 
-from .config import CostParameters, LoadStrategy, OUTPUT_FILE_TEMPLATE
-from .io_loader import load_workbook, params_to_dict
-from .validators import validate_inputs
-from .load_feasible_paths import (
+from src.config import CostParameters, LoadStrategy, OUTPUT_FILE_TEMPLATE
+from src.io_loader import load_workbook, params_to_dict
+from src.validators import validate_inputs
+from src.load_feasible_paths import (
     load_and_filter_feasible_paths,
     validate_feasible_paths_columns,
     validate_path_structure,
     summarize_candidate_paths
 )
-from .milp import solve_network_optimization
+from src.milp import solve_network_optimization
 
 
 def generate_run_id(scenarios_df: pd.DataFrame) -> str:
@@ -201,6 +204,14 @@ def main(input_path: str, output_dir: str) -> int:
             print(f"  Cost per package: ${cost_per_pkg:.3f}")
             print(f"  Middle-mile packages: {total_pkgs:,.0f}")
             print(f"  Direct injection packages: {direct_pkgs_total:,.0f}")
+
+            # Sort level summary
+            if 'chosen_sort_level' in od_selected.columns:
+                sl_summary = od_selected.groupby('chosen_sort_level')['pkgs_day'].sum()
+                print(f"\n  Sort level distribution:")
+                for sl, vol in sl_summary.items():
+                    pct = vol / total_pkgs * 100 if total_pkgs > 0 else 0
+                    print(f"    {sl}: {vol:,.0f} ({pct:.1f}%)")
 
             # Write outputs
             output_filename = OUTPUT_FILE_TEMPLATE.format(

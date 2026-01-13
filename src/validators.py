@@ -181,10 +181,10 @@ def _validate_feasible_paths(df: pd.DataFrame) -> None:
             if df[col].isna().all():
                 raise ValueError(f"feasible_paths column '{col}' is all null")
 
-    # Validate zone_mm_zs
-    if "zone_mm_zs" in df.columns:
-        if (df["zone_mm_zs"] < 0).any():
-            raise ValueError("zone_mm_zs must be non-negative")
+    # Validate zone
+    if "zone" in df.columns:
+        if (df["zone"] < 0).any():
+            raise ValueError("zone must be non-negative")
 
     # Validate node_1 equals origin
     if (df["node_1"] != df["origin"]).any():
