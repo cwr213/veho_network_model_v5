@@ -314,6 +314,12 @@ def solve_network_optimization(
                 # Calculate minimum feasible sort points per facility
                 print(f"\n    DIAGNOSTIC: Minimum feasible sort points per facility:")
                 for facility in exceeded_facilities:
+                    # Get facility capacity
+                    fac_cap = None
+                    if facility in fac_lookup.index and 'max_sort_points_capacity' in fac_lookup.columns:
+                        fac_cap = fac_lookup.at[facility, 'max_sort_points_capacity']
+                    fac_cap = int(fac_cap) if pd.notna(fac_cap) and fac_cap > 0 else 0
+
                     # Get all OD pairs from this facility
                     fac_paths = [i for i in path_keys if path_od_data[i]['origin'] == facility]
                     od_pairs = set((path_od_data[i]['origin'], path_od_data[i]['dest']) for i in fac_paths)
@@ -342,11 +348,11 @@ def solve_network_optimization(
                             pts = ('region', hub, 1)
                         elif sl == 'sort_group':
                             if dest in fac_lookup.index and 'last_mile_sort_groups_count' in fac_lookup.columns:
-                                groups = fac_lookup.at[dest, 'last_mile_sort_groups_count']
-                                groups = int(groups) if pd.notna(groups) and groups > 0 else 1
+                                sort_groups_count = fac_lookup.at[dest, 'last_mile_sort_groups_count']
+                                sort_groups_count = int(sort_groups_count) if pd.notna(sort_groups_count) and sort_groups_count > 0 else 1
                             else:
-                                groups = 1
-                            pts = ('sort_group', dest, cost_params.sort_points_per_destination * groups)
+                                sort_groups_count = 1
+                            pts = ('sort_group', dest, cost_params.sort_points_per_destination * sort_groups_count)
                         else:  # market
                             pts = ('market', dest, cost_params.sort_points_per_destination)
 
@@ -377,11 +383,18 @@ def solve_network_optimization(
                     non_region_pts = sum(pts for _, pts in non_region_dests)
                     total_min = region_pts + non_region_pts
 
+                    # Flag feasibility issue
+                    feasibility_flag = ""
+                    if total_min > fac_cap:
+                        feasibility_flag = " *** INFEASIBLE: min > cap ***"
+                    elif total_min == fac_cap:
+                        feasibility_flag = " *** TIGHT: min == cap ***"
+
                     dests_with_region = len([d for d in min_pts_by_dest if any(o[0]=='region' for o in min_pts_by_dest[d])])
-                    print(f"      {facility}: {len(od_pairs)} destinations")
+                    print(f"      {facility}: {len(od_pairs)} destinations, CAPACITY: {fac_cap}")
                     print(f"        - {dests_with_region} with region available → {region_pts} regional hubs")
                     print(f"        - {len(non_region_dests)} without region → {non_region_pts:.0f} pts (market min)")
-                    print(f"        - MINIMUM FEASIBLE: {total_min:.0f} pts")
+                    print(f"        - MINIMUM FEASIBLE: {total_min:.0f} pts{feasibility_flag}")
 
                     # Show sample destinations WITH and WITHOUT region
                     if dests_with_region > 0:

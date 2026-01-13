@@ -135,7 +135,7 @@ def _validate_scenarios(df: pd.DataFrame) -> None:
         dupes = df[df["scenario_id"].duplicated()]["scenario_id"].tolist()
         raise ValueError(f"Duplicate scenario_ids: {dupes}")
 
-    valid_day_types = {"peak", "average", "trough"}
+    valid_day_types = {"peak", "offpeak"}
     invalid = set(df["day_type"].str.lower()) - valid_day_types
     if invalid:
         raise ValueError(f"Invalid day_types: {invalid}. Must be one of {valid_day_types}")
