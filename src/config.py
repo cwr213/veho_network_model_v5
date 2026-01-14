@@ -65,7 +65,7 @@ class ValidationTolerances:
 EARTH_RADIUS_MILES = 3958.8
 
 # Output file naming
-OUTPUT_FILE_TEMPLATE = "network_opt_{scenario_id}_{strategy}.xlsx"
+OUTPUT_FILE_TEMPLATE = "network_opt_{run_id}.xlsx"
 
 
 # Required columns for feasible_paths from SLA model

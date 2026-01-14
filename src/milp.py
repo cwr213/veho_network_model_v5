@@ -962,6 +962,15 @@ def _build_selected_paths(chosen_idx, path_od_data, path_arcs, arc_meta,
         ) * pd_['pkgs_day']
 
         total = transport + proc
+
+        # Extract node columns from path_nodes
+        nodes = pd_['path_nodes']
+        node_1 = nodes[0] if len(nodes) > 0 else None
+        node_2 = nodes[1] if len(nodes) > 1 else None
+        node_3 = nodes[2] if len(nodes) > 2 else None
+        node_4 = nodes[3] if len(nodes) > 3 else None
+        node_5 = nodes[4] if len(nodes) > 4 else None
+
         data.append({
             'origin': pd_['origin'],
             'dest': pd_['dest'],
@@ -969,6 +978,11 @@ def _build_selected_paths(chosen_idx, path_od_data, path_arcs, arc_meta,
             'path_str': pd_['path_str'],
             'path_type': pd_['path_type'],
             'path_nodes': pd_['path_nodes'],
+            'node_1': node_1,
+            'node_2': node_2,
+            'node_3': node_3,
+            'node_4': node_4,
+            'node_5': node_5,
             'chosen_sort_level': pd_['sort_level'],
             'dest_sort_level': pd_.get('dest_sort_level'),
             'zone': pd_['zone'],
