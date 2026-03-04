@@ -208,11 +208,11 @@ def main(input_path: str, output_dir: str) -> int:
     for scenario_idx, scenario_row in dfs["scenarios"].iterrows():
         scenario_id = scenario_row["scenario_id"]
         year = int(scenario_row["year"])
-        day_type = str(scenario_row["day_type"]).strip().lower()
+        week_number = int(scenario_row["week_number"])
 
         print(f"\n{'-' * 70}")
         print(f"SCENARIO {scenario_idx + 1}/{len(dfs['scenarios'])}: {scenario_id}")
-        print(f"  Year: {year}, Day Type: {day_type}")
+        print(f"  Year: {year}, Week: {week_number}")
         print("-" * 70)
 
         try:
@@ -233,7 +233,7 @@ def main(input_path: str, output_dir: str) -> int:
             print("  Path structure validated")
 
             middle_mile['scenario_id'] = scenario_id
-            middle_mile['day_type'] = day_type
+            middle_mile['week_number'] = week_number
 
             print(summarize_candidate_paths(middle_mile))
 
@@ -329,7 +329,7 @@ def main(input_path: str, output_dir: str) -> int:
             all_results.append({
                 "scenario_id": scenario_id,
                 "year": year,
-                "day_type": day_type,
+                "week_number": week_number,
                 "total_cost": total_cost,
                 "cost_per_pkg": cost_per_pkg,
                 "optional_hub_penalty_total": optional_hub_penalty_total,

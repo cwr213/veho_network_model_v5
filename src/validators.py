@@ -128,17 +128,15 @@ def _validate_package_mix(df: pd.DataFrame) -> None:
 
 def _validate_scenarios(df: pd.DataFrame) -> None:
     """Validate scenarios sheet."""
-    required = ["scenario_id", "year", "day_type"]
+    required = ["scenario_id", "year", "week_number"]
     _check_required_columns(df, required, "scenarios")
 
     if df["scenario_id"].duplicated().any():
         dupes = df[df["scenario_id"].duplicated()]["scenario_id"].tolist()
         raise ValueError(f"Duplicate scenario_ids: {dupes}")
 
-    valid_day_types = {"peak", "offpeak"}
-    invalid = set(df["day_type"].str.lower()) - valid_day_types
-    if invalid:
-        raise ValueError(f"Invalid day_types: {invalid}. Must be one of {valid_day_types}")
+    if not pd.to_numeric(df["week_number"], errors="coerce").notnull().all():
+        raise ValueError("week_number must contain integer values")
 
 
 def _validate_run_settings(df: pd.DataFrame) -> None:
