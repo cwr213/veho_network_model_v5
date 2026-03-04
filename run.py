@@ -91,21 +91,14 @@ def append_direct_injection_to_paths(od_selected: pd.DataFrame, direct_day: pd.D
             'tit_hours': 0,
             'total_path_miles': 0,
             'direct_miles': 0,
-            'total_cost': 0,  # Cost calculated below
+            'total_cost': 0,
             'linehaul_cost': 0,
-            'processing_cost': 0,  # Cost calculated below
+            'processing_cost': 0,
+            'optional_hub_penalty': 0,
             'cost_per_pkg': 0,
         })
 
     di_df = pd.DataFrame(di_rows)
-
-    # Calculate processing cost for direct injection
-    # Direct injection only needs last-mile sort + delivery
-    # (no injection sort since it arrives already sorted from shipper)
-    if not di_df.empty and 'cost_params' in globals():
-        # This will be filled in when we have cost_params available
-        # For now, mark as 0 - will be corrected in the scenario loop
-        pass
 
     # Combine middle-mile and direct injection
     combined = pd.concat([od_selected, di_df], ignore_index=True)
@@ -171,6 +164,11 @@ def main(input_path: str, output_dir: str) -> int:
     cost_params_dict = params_to_dict(dfs["cost_params"])
     run_settings_dict = params_to_dict(dfs["run_settings"])
 
+    # Load optional_hub_penalty_per_pkg with default of 0.0 if not specified
+    optional_hub_penalty = float(cost_params_dict.get("optional_hub_penalty_per_pkg", 0.0))
+    # Legacy touch_penalty support (deprecated)
+    touch_penalty = float(cost_params_dict.get("touch_penalty_per_pkg", 0.0))
+
     cost_params = CostParameters(
         injection_sort_cost_per_pkg=float(cost_params_dict["injection_sort_cost_per_pkg"]),
         intermediate_sort_cost_per_pkg=float(cost_params_dict["intermediate_sort_cost_per_pkg"]),
@@ -178,6 +176,8 @@ def main(input_path: str, output_dir: str) -> int:
         last_mile_delivery_cost_per_pkg=float(cost_params_dict["last_mile_delivery_cost_per_pkg"]),
         container_handling_cost=float(cost_params_dict["container_handling_cost"]),
         sort_points_per_destination=float(cost_params_dict["sort_points_per_destination"]),
+        touch_penalty_per_pkg=touch_penalty,
+        optional_hub_penalty_per_pkg=optional_hub_penalty,
     )
 
     global_strategy = LoadStrategy.CONTAINER
@@ -189,6 +189,7 @@ def main(input_path: str, output_dir: str) -> int:
     print(f"\nConfiguration:")
     print(f"  Strategy: Container")
     print(f"  Sort optimization: {'ENABLED' if enable_sort_opt else 'DISABLED'}")
+    print(f"  Optional hub penalty: ${optional_hub_penalty:.2f}/pkg (for non-required intermediates)")
     print(f"  Allow inactive arcs: {run_settings_dict.get('allow_inactive_arcs', False)}")
     print(f"  Run ID: {run_id}")
 
@@ -291,9 +292,13 @@ def main(input_path: str, output_dir: str) -> int:
             mm_pkgs = od_selected["pkgs_day"].sum()
             cost_per_pkg = total_cost / max(total_pkgs, 1)
 
+            # Calculate optional hub penalty total
+            optional_hub_penalty_total = od_selected_with_di["optional_hub_penalty"].sum() if "optional_hub_penalty" in od_selected_with_di.columns else 0
+
             print(f"\n3. Results:")
             print(f"  Total cost: ${total_cost:,.0f}")
             print(f"  Cost per package: ${cost_per_pkg:.3f}")
+            print(f"  Optional hub penalty total: ${optional_hub_penalty_total:,.0f}")
             print(f"  Middle-mile packages: {mm_pkgs:,.0f}")
             print(f"  Direct injection packages: {direct_pkgs_total:,.0f}")
             print(f"  Total packages (MM + DI): {total_pkgs:,.0f}")
@@ -305,6 +310,14 @@ def main(input_path: str, output_dir: str) -> int:
                 for sl, vol in sl_summary.items():
                     pct = vol / mm_pkgs * 100 if mm_pkgs > 0 else 0
                     print(f"    {sl}: {vol:,.0f} ({pct:.1f}%)")
+
+            # Path type summary (direct vs multi-hop)
+            if 'path_nodes' in od_selected.columns:
+                direct_paths = od_selected[od_selected['path_nodes'].apply(len) == 2]
+                multi_hop_paths = od_selected[od_selected['path_nodes'].apply(len) > 2]
+                print(f"\n  Path type distribution (middle-mile):")
+                print(f"    Direct (2-touch): {len(direct_paths)} paths, {direct_paths['pkgs_day'].sum():,.0f} pkgs")
+                print(f"    Multi-hop (3+ touch): {len(multi_hop_paths)} paths, {multi_hop_paths['pkgs_day'].sum():,.0f} pkgs")
 
             # Accumulate results for combined output
             all_selected_paths.append(od_selected_with_di)
@@ -319,6 +332,7 @@ def main(input_path: str, output_dir: str) -> int:
                 "day_type": day_type,
                 "total_cost": total_cost,
                 "cost_per_pkg": cost_per_pkg,
+                "optional_hub_penalty_total": optional_hub_penalty_total,
                 "middle_mile_packages": mm_pkgs,
                 "direct_injection_packages": direct_pkgs_total,
                 "total_packages": total_pkgs,
@@ -396,61 +410,6 @@ def _write_combined_output(
         # Sort summary - all scenarios combined
         if not sort_summary.empty:
             sort_summary.to_excel(writer, sheet_name="sort_summary", index=False)
-
-
-def _write_scenario_output(
-    output_path: Path,
-    scenario_id: str,
-    year: int,
-    day_type: str,
-    strategy: LoadStrategy,
-    od_selected: pd.DataFrame,
-    arc_summary: pd.DataFrame,
-    kpis: dict,
-    sort_summary: pd.DataFrame,
-    direct_pkgs: float
-):
-    """DEPRECATED: Write scenario output to Excel."""
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        # Summary sheet
-        summary_data = [
-            {"key": "scenario_id", "value": scenario_id},
-            {"key": "year", "value": year},
-            {"key": "day_type", "value": day_type},
-            {"key": "strategy", "value": strategy.value},
-            {"key": "total_cost", "value": od_selected["total_cost"].sum()},
-            {"key": "cost_per_pkg", "value": od_selected["total_cost"].sum() / max(od_selected["pkgs_day"].sum(), 1)},
-            {"key": "middle_mile_packages", "value": od_selected["pkgs_day"].sum()},
-            {"key": "direct_injection_packages", "value": direct_pkgs},
-        ]
-        for k, v in kpis.items():
-            summary_data.append({"key": k, "value": v})
-
-        pd.DataFrame(summary_data).to_excel(writer, sheet_name="summary", index=False)
-
-        # Selected paths
-        od_out = od_selected.copy()
-        if 'path_nodes' in od_out.columns:
-            od_out['path_nodes'] = od_out['path_nodes'].apply(lambda x: '->'.join(x) if isinstance(x, list) else x)
-        od_out.to_excel(writer, sheet_name="selected_paths", index=False)
-
-        # Arc summary
-        if not arc_summary.empty:
-            arc_summary.to_excel(writer, sheet_name="arc_summary", index=False)
-
-        # Sort summary
-        if not sort_summary.empty:
-            sort_summary.to_excel(writer, sheet_name="sort_summary", index=False)
-
-
-def _write_comparison(output_dir: Path, run_id: str, results: list):
-    """DEPRECATED: Write multi-scenario comparison (now in combined output)."""
-    compare_path = output_dir / f"comparison_{run_id}.xlsx"
-
-    df = pd.DataFrame(results)
-    with pd.ExcelWriter(compare_path, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name="comparison", index=False)
-
 
 
 if __name__ == "__main__":

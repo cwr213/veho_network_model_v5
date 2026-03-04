@@ -116,7 +116,6 @@ def _split_flow_types(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df["zone"] = df["zone"].fillna(0).astype(int)
 
     # Middle-mile: paths with pkgs_day > 0 and not direct_injection type
-    # (direct_injection paths have their own handling)
     middle_mile = df[
         (df["pkgs_day"] > 0) &
         (df["path_type"].str.lower() != "direct_injection")

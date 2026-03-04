@@ -10,6 +10,7 @@ Key Features:
 - Regional sort consistency constraint
 - Container persistence through crossdocks
 - Transport costs from mileage_bands
+- Touch penalty to discourage unnecessary intermediate hops
 
 Sort Level Business Rules (from requirements):
 1. Hub is regional hub for dest AND hub != dest → minimum market sort (can't do region)
@@ -77,14 +78,12 @@ def solve_network_optimization(
     cand = candidates.reset_index(drop=True).copy()
     print(f"    Strategy: {global_strategy.value}")
     print(f"    Sort optimization: {'ENABLED' if enable_sort_optimization else 'DISABLED'}")
+    print(f"    Optional hub penalty: ${cost_params.optional_hub_penalty_per_pkg:.2f}/pkg")
     print(f"    Candidate paths: {len(cand):,}")
 
     if cand.empty:
         print("    ERROR: No candidate paths received by solver")
         return pd.DataFrame(), pd.DataFrame(), {"solver_status": "NO_CANDIDATES"}, pd.DataFrame()
-
-    # Debug: show columns available
-    print(f"    DEBUG: Candidate columns: {list(cand.columns)}")
 
     # Build facility lookup
     fac_lookup = facilities.set_index("facility_name")
@@ -128,12 +127,10 @@ def solve_network_optimization(
         consistency_count = _add_regional_sort_consistency_constraints(
             model, x, path_keys, path_od_data, fac_lookup
         )
-
-        # If infeasible, we'll retry without constraints to diagnose
     else:
         print("    Sort optimization DISABLED - no sort constraints added")
 
-    # Objective: minimize total cost (transport + processing)
+    # Objective: minimize total cost (transport + processing + touch penalty)
     cost_terms = []
 
     # Transport costs (per arc)
@@ -141,7 +138,7 @@ def solve_network_optimization(
         truck_cost = safe_int_cost(arc_meta[a_idx]["cost_per_truck"], f"arc_{a_idx}")
         cost_terms.append(arc_trucks[a_idx] * truck_cost)
 
-    # Processing costs (per path)
+    # Processing costs including touch penalty (per path)
     for i in path_keys:
         path_data = path_od_data[i]
         volume = int(round(path_data['pkgs_day']))
@@ -172,299 +169,11 @@ def solve_network_optimization(
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         print(f"\n    DEBUG: Solver failed with status {status_msg}")
-        print(f"    DEBUG: Total paths in model: {len(path_keys)}")
-        print(f"    DEBUG: Total OD pairs: {len(groups)}")
-        print(f"    DEBUG: Total arcs: {len(arc_meta)}")
-
-        # Check if any OD has zero paths
-        empty_ods = [(od, len(idxs)) for od, idxs in groups.items() if len(idxs) == 0]
-        if empty_ods:
-            print(f"    DEBUG: OD pairs with zero paths: {empty_ods[:5]}")
-
-        # Sample some path data
-        if path_keys:
-            sample_idx = path_keys[0]
-            print(f"    DEBUG: Sample path data: {path_od_data[sample_idx]}")
-
-        # If sort optimization was enabled and we got INFEASIBLE, diagnose
-        if enable_sort_optimization and status == cp_model.INFEASIBLE:
-            print(f"\n    DIAGNOSTIC: Retrying WITHOUT sort constraints to identify cause...")
-
-            # Rebuild model without sort constraints
-            model2 = cp_model.CpModel()
-            x2 = {i: model2.NewBoolVar(f"x_{i}") for i in path_keys}
-            arc_pkgs2 = {a: model2.NewIntVar(0, 10_000_000, f"arc_pkgs_{a}") for a in range(len(arc_meta))}
-            arc_trucks2 = {a: model2.NewIntVar(0, 10_000, f"arc_trucks_{a}") for a in range(len(arc_meta))}
-
-            # One path per OD
-            for group_name, idxs in groups.items():
-                model2.Add(sum(x2[i] for i in idxs) == 1)
-
-            # Arc capacity only
-            _add_arc_capacity_constraints(
-                model2, x2, arc_pkgs2, arc_trucks2, arc_meta, path_arcs,
-                path_od_data, path_keys, package_mix, container_params
-            )
-
-            # Simple objective
-            cost_terms2 = []
-            for a_idx in range(len(arc_meta)):
-                truck_cost = safe_int_cost(arc_meta[a_idx]["cost_per_truck"], f"arc_{a_idx}")
-                cost_terms2.append(arc_trucks2[a_idx] * truck_cost)
-            for i in path_keys:
-                path_data = path_od_data[i]
-                volume = int(round(path_data['pkgs_day']))
-                proc_cost = _calculate_processing_cost(
-                    path_data, fac_lookup, package_mix, container_params, cost_params
-                )
-                cost_terms2.append(x2[i] * safe_int_cost(proc_cost * volume, f"path_{i}"))
-            model2.Minimize(sum(cost_terms2))
-
-            solver2 = cp_model.CpSolver()
-            solver2.parameters.max_time_in_seconds = 60
-            status2 = solver2.Solve(model2)
-
-            status2_msg = {
-                cp_model.OPTIMAL: "OPTIMAL",
-                cp_model.FEASIBLE: "FEASIBLE",
-                cp_model.INFEASIBLE: "INFEASIBLE",
-            }.get(status2, f"Status_{status2}")
-
-            print(f"    DIAGNOSTIC: Without sort constraints: {status2_msg}")
-
-            if status2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-                print(f"    CONCLUSION: Sort constraints are causing infeasibility")
-                print(f"    ACTION: Check max_sort_points_capacity in facilities or scenario")
-
-                # Analyze what the unconstrained solution chose
-                chosen_sort_levels = {}
-                for i in path_keys:
-                    if solver2.Value(x2[i]) == 1:
-                        sl = path_od_data[i]['sort_level']
-                        chosen_sort_levels[sl] = chosen_sort_levels.get(sl, 0) + 1
-                print(f"    DIAGNOSTIC: Unconstrained solution sort levels: {chosen_sort_levels}")
-
-                # Calculate sort points that would be used per facility (UNIQUE destinations)
-                facility_sort_points = {}
-                facility_dest_combos = {}  # facility -> set of (sort_target, eff_sort)
-                pts_per_dest = cost_params.sort_points_per_destination
-
-                for i in path_keys:
-                    if solver2.Value(x2[i]) == 1:
-                        origin = path_od_data[i]['origin']
-                        dest = path_od_data[i]['dest']
-                        sl = path_od_data[i]['sort_level']
-
-                        # Determine effective sort target
-                        if sl == 'region':
-                            if dest in fac_lookup.index and 'regional_sort_hub' in fac_lookup.columns:
-                                regional_hub = fac_lookup.at[dest, 'regional_sort_hub']
-                                if pd.isna(regional_hub) or regional_hub == '':
-                                    regional_hub = dest
-                            else:
-                                regional_hub = dest
-
-                            if origin == regional_hub:
-                                eff_sort = 'market'
-                                sort_target = dest
-                            else:
-                                eff_sort = 'region'
-                                sort_target = regional_hub
-                        else:
-                            eff_sort = sl
-                            sort_target = dest
-
-                        if origin not in facility_dest_combos:
-                            facility_dest_combos[origin] = set()
-                        facility_dest_combos[origin].add((sort_target, eff_sort))
-
-                # Now calculate points from unique combos
-                for origin, combos in facility_dest_combos.items():
-                    total_pts = 0
-                    for (sort_target, eff_sort) in combos:
-                        if eff_sort == 'sort_group':
-                            if sort_target in fac_lookup.index and 'last_mile_sort_groups_count' in fac_lookup.columns:
-                                groups_count = fac_lookup.at[sort_target, 'last_mile_sort_groups_count']
-                                pts = pts_per_dest * (int(groups_count) if pd.notna(groups_count) and groups_count > 0 else 1)
-                            else:
-                                pts = pts_per_dest
-                        elif eff_sort == 'market':
-                            pts = pts_per_dest
-                        elif eff_sort == 'region':
-                            pts = 1
-                        else:
-                            pts = pts_per_dest
-                        total_pts += pts
-                    facility_sort_points[origin] = total_pts
-
-                # Compare to capacities
-                print(f"\n    DIAGNOSTIC: Sort point usage vs capacity:")
-                exceeded_facilities = []
-                for facility in sorted(facility_sort_points.keys()):
-                    used = facility_sort_points[facility]
-                    cap = None
-                    if facility in fac_lookup.index and 'max_sort_points_capacity' in fac_lookup.columns:
-                        cap = fac_lookup.at[facility, 'max_sort_points_capacity']
-                    cap_str = f"{int(cap)}" if pd.notna(cap) and cap > 0 else "unlimited"
-                    exceeded = "*** EXCEEDED ***" if (pd.notna(cap) and cap > 0 and used > cap) else ""
-                    if exceeded:
-                        exceeded_facilities.append(facility)
-                    print(f"      {facility}: {used:.0f} used / {cap_str} capacity {exceeded}")
-
-                # Calculate minimum feasible sort points per facility
-                print(f"\n    DIAGNOSTIC: Minimum feasible sort points per facility:")
-                for facility in exceeded_facilities:
-                    # Get facility capacity
-                    fac_cap = None
-                    if facility in fac_lookup.index and 'max_sort_points_capacity' in fac_lookup.columns:
-                        fac_cap = fac_lookup.at[facility, 'max_sort_points_capacity']
-                    fac_cap = int(fac_cap) if pd.notna(fac_cap) and fac_cap > 0 else 0
-
-                    # Get all OD pairs from this facility
-                    fac_paths = [i for i in path_keys if path_od_data[i]['origin'] == facility]
-                    od_pairs = set((path_od_data[i]['origin'], path_od_data[i]['dest']) for i in fac_paths)
-
-                    # DIAGNOSTIC: Count actual region paths
-                    region_path_count = sum(1 for i in fac_paths if path_od_data[i]['sort_level'] == 'region')
-                    region_dests = set(path_od_data[i]['dest'] for i in fac_paths if path_od_data[i]['sort_level'] == 'region')
-                    print(f"\n      {facility}: DEBUG - {region_path_count} region paths to {len(region_dests)} destinations")
-
-                    # For each dest, find minimum sort points available
-                    min_pts_by_dest = {}
-                    for i in fac_paths:
-                        dest = path_od_data[i]['dest']
-                        sl = path_od_data[i]['sort_level']
-
-                        # Calculate sort points for this sort level
-                        if sl == 'region':
-                            # Get regional hub
-                            if dest in fac_lookup.index and 'regional_sort_hub' in fac_lookup.columns:
-                                hub = fac_lookup.at[dest, 'regional_sort_hub']
-                                if pd.isna(hub) or hub == '':
-                                    hub = dest
-                            else:
-                                hub = dest
-                            # Region sorts share hub - will be counted later
-                            pts = ('region', hub, 1)
-                        elif sl == 'sort_group':
-                            if dest in fac_lookup.index and 'last_mile_sort_groups_count' in fac_lookup.columns:
-                                sort_groups_count = fac_lookup.at[dest, 'last_mile_sort_groups_count']
-                                sort_groups_count = int(sort_groups_count) if pd.notna(sort_groups_count) and sort_groups_count > 0 else 1
-                            else:
-                                sort_groups_count = 1
-                            pts = ('sort_group', dest, cost_params.sort_points_per_destination * sort_groups_count)
-                        else:  # market
-                            pts = ('market', dest, cost_params.sort_points_per_destination)
-
-                        # Track minimum per destination
-                        if dest not in min_pts_by_dest:
-                            min_pts_by_dest[dest] = []
-                        min_pts_by_dest[dest].append(pts)
-
-                    # Calculate theoretical minimum
-                    total_min = 0
-                    region_hubs = set()
-                    non_region_dests = []
-
-                    for dest, options in min_pts_by_dest.items():
-                        # Check if region is available
-                        region_opts = [o for o in options if o[0] == 'region']
-                        if region_opts:
-                            # Use region (just track the hub)
-                            region_hubs.add(region_opts[0][1])
-                        else:
-                            # Must use market or sort_group - pick min
-                            min_pts = min(o[2] for o in options)
-                            non_region_dests.append((dest, min_pts))
-
-                    # Region hubs cost 1 pt each
-                    region_pts = len(region_hubs)
-                    # Non-region dests cost their min
-                    non_region_pts = sum(pts for _, pts in non_region_dests)
-                    total_min = region_pts + non_region_pts
-
-                    # Flag feasibility issue
-                    feasibility_flag = ""
-                    if total_min > fac_cap:
-                        feasibility_flag = " *** INFEASIBLE: min > cap ***"
-                    elif total_min == fac_cap:
-                        feasibility_flag = " *** TIGHT: min == cap ***"
-
-                    dests_with_region = len([d for d in min_pts_by_dest if any(o[0]=='region' for o in min_pts_by_dest[d])])
-                    print(f"      {facility}: {len(od_pairs)} destinations, CAPACITY: {fac_cap}")
-                    print(f"        - {dests_with_region} with region available → {region_pts} regional hubs")
-                    print(f"        - {len(non_region_dests)} without region → {non_region_pts:.0f} pts (market min)")
-                    print(f"        - MINIMUM FEASIBLE: {total_min:.0f} pts{feasibility_flag}")
-
-                    # Show sample destinations WITH and WITHOUT region
-                    if dests_with_region > 0:
-                        sample_with = [d for d in min_pts_by_dest if any(o[0]=='region' for o in min_pts_by_dest[d])][:3]
-                        print(f"        - Sample WITH region: {sample_with}")
-                    if non_region_dests:
-                        sample_without = [d for d, _ in non_region_dests[:3]]
-                        print(f"        - Sample WITHOUT region: {sample_without}")
-
-                # TEST: Try with ONLY sort capacity constraints (no regional consistency)
-                print(f"\n    DIAGNOSTIC: Testing with ONLY sort capacity (no regional consistency)...")
-                model3 = cp_model.CpModel()
-                x3 = {i: model3.NewBoolVar(f"x_{i}") for i in path_keys}
-                arc_pkgs3 = {a: model3.NewIntVar(0, 10_000_000, f"arc_pkgs_{a}") for a in range(len(arc_meta))}
-                arc_trucks3 = {a: model3.NewIntVar(0, 10_000, f"arc_trucks_{a}") for a in range(len(arc_meta))}
-
-                for group_name, idxs in groups.items():
-                    model3.Add(sum(x3[i] for i in idxs) == 1)
-
-                _add_arc_capacity_constraints(
-                    model3, x3, arc_pkgs3, arc_trucks3, arc_meta, path_arcs,
-                    path_od_data, path_keys, package_mix, container_params
-                )
-
-                # Add ONLY sort capacity constraints (no regional consistency)
-                _add_sort_capacity_constraints(
-                    model3, x3, path_keys, path_od_data, fac_lookup, cost_params, scenario_row
-                )
-
-                cost_terms3 = []
-                for a_idx in range(len(arc_meta)):
-                    truck_cost = safe_int_cost(arc_meta[a_idx]["cost_per_truck"], f"arc_{a_idx}")
-                    cost_terms3.append(arc_trucks3[a_idx] * truck_cost)
-                for i in path_keys:
-                    path_data = path_od_data[i]
-                    volume = int(round(path_data['pkgs_day']))
-                    proc_cost = _calculate_processing_cost(
-                        path_data, fac_lookup, package_mix, container_params, cost_params
-                    )
-                    cost_terms3.append(x3[i] * safe_int_cost(proc_cost * volume, f"path_{i}"))
-                model3.Minimize(sum(cost_terms3))
-
-                solver3 = cp_model.CpSolver()
-                solver3.parameters.max_time_in_seconds = 120
-                status3 = solver3.Solve(model3)
-
-                status3_msg = {
-                    cp_model.OPTIMAL: "OPTIMAL",
-                    cp_model.FEASIBLE: "FEASIBLE",
-                    cp_model.INFEASIBLE: "INFEASIBLE",
-                }.get(status3, f"Status_{status3}")
-
-                print(f"    DIAGNOSTIC: With ONLY sort capacity: {status3_msg}")
-
-                if status3 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-                    print(f"    ROOT CAUSE: Regional sort consistency constraint is making model infeasible")
-
-                    # Show what solution capacity-only found
-                    cap_only_sort_levels = {}
-                    for i in path_keys:
-                        if solver3.Value(x3[i]) == 1:
-                            sl = path_od_data[i]['sort_level']
-                            cap_only_sort_levels[sl] = cap_only_sort_levels.get(sl, 0) + 1
-                    print(f"    DIAGNOSTIC: Capacity-only solution: {cap_only_sort_levels}")
-                else:
-                    print(f"    ROOT CAUSE: Sort capacity constraints alone make model infeasible")
-                    print(f"    This means minimum feasible calculation is wrong or capacity too low")
-            else:
-                print(f"    CONCLUSION: Problem is in base model (OD coverage or arc constraints)")
-
+        _diagnose_infeasibility(
+            model, x, path_keys, path_od_data, groups, arc_meta, path_arcs,
+            fac_lookup, cost_params, package_mix, container_params, scenario_row,
+            enable_sort_optimization
+        )
         return pd.DataFrame(), pd.DataFrame(), {"solver_status": status_msg}, pd.DataFrame()
 
     # Extract solution
@@ -473,6 +182,9 @@ def solve_network_optimization(
 
     # Debug: show selected sort levels
     _debug_selected_sort_levels(chosen_idx, path_od_data)
+
+    # Debug: show touch distribution
+    _debug_touch_distribution(chosen_idx, path_od_data)
 
     selected_paths = _build_selected_paths(
         chosen_idx, path_od_data, path_arcs, arc_meta,
@@ -524,6 +236,166 @@ def _debug_selected_sort_levels(chosen_idx: list, path_od_data: dict) -> None:
         sort_level_counts[sl] = sort_level_counts.get(sl, 0) + 1
 
     print(f"    DEBUG: Selected sort levels: {sort_level_counts}")
+
+
+def _debug_touch_distribution(chosen_idx: list, path_od_data: dict) -> None:
+    """Debug: print distribution of touches in selected paths."""
+    touch_counts = {}
+    for i in chosen_idx:
+        nodes = path_od_data[i]['path_nodes']
+        num_touches = len(nodes)  # Total nodes including origin and dest
+        touch_counts[num_touches] = touch_counts.get(num_touches, 0) + 1
+
+    print(f"    DEBUG: Path touch distribution: {touch_counts}")
+
+    # Count paths with intermediate hops
+    multi_hop = sum(1 for i in chosen_idx if len(path_od_data[i]['path_nodes']) > 2)
+    direct = sum(1 for i in chosen_idx if len(path_od_data[i]['path_nodes']) == 2)
+    print(f"    DEBUG: Direct paths: {direct}, Multi-hop paths: {multi_hop}")
+
+
+def _diagnose_infeasibility(
+    model, x, path_keys, path_od_data, groups, arc_meta, path_arcs,
+    fac_lookup, cost_params, package_mix, container_params, scenario_row,
+    enable_sort_optimization
+):
+    """Diagnose why the model is infeasible."""
+    print(f"    DEBUG: Total paths in model: {len(path_keys)}")
+    print(f"    DEBUG: Total OD pairs: {len(groups)}")
+    print(f"    DEBUG: Total arcs: {len(arc_meta)}")
+
+    # Check if any OD has zero paths
+    empty_ods = [(od, len(idxs)) for od, idxs in groups.items() if len(idxs) == 0]
+    if empty_ods:
+        print(f"    DEBUG: OD pairs with zero paths: {empty_ods[:5]}")
+
+    # If sort optimization was enabled and we got INFEASIBLE, diagnose
+    if enable_sort_optimization:
+        print(f"\n    DIAGNOSTIC: Retrying WITHOUT sort constraints to identify cause...")
+
+        # Rebuild model without sort constraints
+        model2 = cp_model.CpModel()
+        x2 = {i: model2.NewBoolVar(f"x_{i}") for i in path_keys}
+        arc_pkgs2 = {a: model2.NewIntVar(0, 10_000_000, f"arc_pkgs_{a}") for a in range(len(arc_meta))}
+        arc_trucks2 = {a: model2.NewIntVar(0, 10_000, f"arc_trucks_{a}") for a in range(len(arc_meta))}
+
+        # One path per OD
+        for group_name, idxs in groups.items():
+            model2.Add(sum(x2[i] for i in idxs) == 1)
+
+        # Arc capacity only
+        _add_arc_capacity_constraints(
+            model2, x2, arc_pkgs2, arc_trucks2, arc_meta, path_arcs,
+            path_od_data, path_keys, package_mix, container_params
+        )
+
+        # Simple objective
+        cost_terms2 = []
+        for a_idx in range(len(arc_meta)):
+            truck_cost = safe_int_cost(arc_meta[a_idx]["cost_per_truck"], f"arc_{a_idx}")
+            cost_terms2.append(arc_trucks2[a_idx] * truck_cost)
+        for i in path_keys:
+            path_data = path_od_data[i]
+            volume = int(round(path_data['pkgs_day']))
+            proc_cost = _calculate_processing_cost(
+                path_data, fac_lookup, package_mix, container_params, cost_params
+            )
+            cost_terms2.append(x2[i] * safe_int_cost(proc_cost * volume, f"path_{i}"))
+        model2.Minimize(sum(cost_terms2))
+
+        solver2 = cp_model.CpSolver()
+        solver2.parameters.max_time_in_seconds = 60
+        status2 = solver2.Solve(model2)
+
+        status2_msg = {
+            cp_model.OPTIMAL: "OPTIMAL",
+            cp_model.FEASIBLE: "FEASIBLE",
+            cp_model.INFEASIBLE: "INFEASIBLE",
+        }.get(status2, f"Status_{status2}")
+
+        print(f"    DIAGNOSTIC: Without sort constraints: {status2_msg}")
+
+        if status2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            print(f"    CONCLUSION: Sort constraints are causing infeasibility")
+            _analyze_unconstrained_solution(solver2, x2, path_keys, path_od_data, fac_lookup, cost_params)
+        else:
+            print(f"    CONCLUSION: Problem is in base model (OD coverage or arc constraints)")
+
+
+def _analyze_unconstrained_solution(solver, x, path_keys, path_od_data, fac_lookup, cost_params):
+    """Analyze the unconstrained solution to understand sort point requirements."""
+    pts_per_dest = cost_params.sort_points_per_destination
+
+    # Analyze what the unconstrained solution chose
+    chosen_sort_levels = {}
+    for i in path_keys:
+        if solver.Value(x[i]) == 1:
+            sl = path_od_data[i]['sort_level']
+            chosen_sort_levels[sl] = chosen_sort_levels.get(sl, 0) + 1
+    print(f"    DIAGNOSTIC: Unconstrained solution sort levels: {chosen_sort_levels}")
+
+    # Calculate sort points that would be used per facility (UNIQUE destinations)
+    facility_sort_points = {}
+    facility_dest_combos = {}
+
+    for i in path_keys:
+        if solver.Value(x[i]) == 1:
+            origin = path_od_data[i]['origin']
+            dest = path_od_data[i]['dest']
+            sl = path_od_data[i]['sort_level']
+
+            # Determine effective sort target
+            if sl == 'region':
+                if dest in fac_lookup.index and 'regional_sort_hub' in fac_lookup.columns:
+                    regional_hub = fac_lookup.at[dest, 'regional_sort_hub']
+                    if pd.isna(regional_hub) or regional_hub == '':
+                        regional_hub = dest
+                else:
+                    regional_hub = dest
+
+                if origin == regional_hub:
+                    eff_sort = 'market'
+                    sort_target = dest
+                else:
+                    eff_sort = 'region'
+                    sort_target = regional_hub
+            else:
+                eff_sort = sl
+                sort_target = dest
+
+            if origin not in facility_dest_combos:
+                facility_dest_combos[origin] = set()
+            facility_dest_combos[origin].add((sort_target, eff_sort))
+
+    # Calculate points from unique combos
+    for origin, combos in facility_dest_combos.items():
+        total_pts = 0
+        for (sort_target, eff_sort) in combos:
+            if eff_sort == 'sort_group':
+                if sort_target in fac_lookup.index and 'last_mile_sort_groups_count' in fac_lookup.columns:
+                    groups_count = fac_lookup.at[sort_target, 'last_mile_sort_groups_count']
+                    pts = pts_per_dest * (int(groups_count) if pd.notna(groups_count) and groups_count > 0 else 1)
+                else:
+                    pts = pts_per_dest
+            elif eff_sort == 'market':
+                pts = pts_per_dest
+            elif eff_sort == 'region':
+                pts = 1
+            else:
+                pts = pts_per_dest
+            total_pts += pts
+        facility_sort_points[origin] = total_pts
+
+    # Compare to capacities
+    print(f"\n    DIAGNOSTIC: Sort point usage vs capacity:")
+    for facility in sorted(facility_sort_points.keys()):
+        used = facility_sort_points[facility]
+        cap = None
+        if facility in fac_lookup.index and 'max_sort_points_capacity' in fac_lookup.columns:
+            cap = fac_lookup.at[facility, 'max_sort_points_capacity']
+        cap_str = f"{int(cap)}" if pd.notna(cap) and cap > 0 else "unlimited"
+        exceeded = "*** EXCEEDED ***" if (pd.notna(cap) and cap > 0 and used > cap) else ""
+        print(f"      {facility}: {used:.0f} used / {cap_str} capacity {exceeded}")
 
 
 def _build_arc_structures(cand, facilities, mileage_bands, path_keys):
@@ -645,11 +517,8 @@ def _add_sort_capacity_constraints(model, x, path_keys, path_od_data, fac_lookup
             continue
         max_cap = int(max_cap)
 
-        # For sort point counting, we need to track unique destinations per sort level
-        # When a path is selected, it "activates" that (destination, sort_level) combo
-
         # Group paths by (effective_sort_target, effective_sort_level)
-        dest_sort_combos = {}  # (sort_target, eff_sort) -> list of path indices
+        dest_sort_combos = {}
 
         for i in origin_paths[facility]:
             dest = path_od_data[i]['dest']
@@ -657,7 +526,6 @@ def _add_sort_capacity_constraints(model, x, path_keys, path_od_data, fac_lookup
 
             # Determine effective sort level and target for sort point counting
             if sl == 'region':
-                # For region sort, we're sorting to the regional hub
                 if dest in fac_lookup.index and 'regional_sort_hub' in fac_lookup.columns:
                     regional_hub = fac_lookup.at[dest, 'regional_sort_hub']
                     if pd.isna(regional_hub) or regional_hub == '':
@@ -666,7 +534,6 @@ def _add_sort_capacity_constraints(model, x, path_keys, path_od_data, fac_lookup
                     regional_hub = dest
 
                 if facility == regional_hub:
-                    # Origin IS the regional hub - can't do region sort
                     eff_sort = 'market'
                     sort_target = dest
                 else:
@@ -680,7 +547,6 @@ def _add_sort_capacity_constraints(model, x, path_keys, path_od_data, fac_lookup
             dest_sort_combos.setdefault(key, []).append(i)
 
         # Create binary variable for each unique (sort_target, sort_level) combo
-        # This variable = 1 if we route to that target at that sort level
         combo_vars = {}
         for key, path_indices in dest_sort_combos.items():
             sort_target, eff_sort = key
@@ -688,11 +554,6 @@ def _add_sort_capacity_constraints(model, x, path_keys, path_od_data, fac_lookup
             combo_var = model.NewBoolVar(var_name)
             combo_vars[key] = combo_var
 
-            # combo_var = 1 iff at least one of these paths is selected
-            # At most one path per OD is selected, so sum(x[i]) is 0 or 1 for each OD
-            # But multiple ODs might share the same (sort_target, eff_sort) combo
-
-            # combo_var >= x[i] for all i (if any path selected, combo is active)
             for i in path_indices:
                 model.Add(combo_var >= x[i])
 
@@ -718,7 +579,6 @@ def _add_sort_capacity_constraints(model, x, path_keys, path_od_data, fac_lookup
             model.Add(sum(point_terms) <= max_cap)
             constraints_added += 1
 
-            # Debug: show how many unique combos this facility has
             sg_count = sum(1 for (_, eff) in combo_vars.keys() if eff == 'sort_group')
             mkt_count = sum(1 for (_, eff) in combo_vars.keys() if eff == 'market')
             reg_count = sum(1 for (_, eff) in combo_vars.keys() if eff == 'region')
@@ -735,10 +595,7 @@ def _add_regional_sort_consistency_constraints(model, x, path_keys, path_od_data
     Ensure consistent sort level on each arc from regional hub to destination.
 
     Business logic: On arc (hub → dest), all containers must be at the same
-    sort granularity. For example:
-    - Path A→B→C with region sort: B re-sorts to dest_sort_level for arc B→C
-    - Path B→C with sort_group: arc B→C carries sort_group containers
-    - If both exist, they must agree (B→C forces sort_group for A→B→C's DSL)
+    sort granularity.
 
     O=D paths are excluded - they don't use any linehaul arc.
     Paths where hub==dest are excluded - no arc from hub to itself.
@@ -753,7 +610,7 @@ def _add_regional_sort_consistency_constraints(model, x, path_keys, path_od_data
             dest_to_hub[f] = f
 
     # Find arcs (hub → dest) and group paths by effective sort level on that arc
-    arc_sort_levels = {}  # (hub, dest) -> {effective_sort_level: [path_indices]}
+    arc_sort_levels = {}
 
     for i in path_keys:
         pd_ = path_od_data[i]
@@ -763,7 +620,6 @@ def _add_regional_sort_consistency_constraints(model, x, path_keys, path_od_data
         sl = pd_['sort_level']
         dsl = pd_.get('dest_sort_level')
 
-        # Skip O=D paths - they don't use any linehaul arc
         if origin == dest:
             continue
 
@@ -771,23 +627,18 @@ def _add_regional_sort_consistency_constraints(model, x, path_keys, path_od_data
             continue
         hub = dest_to_hub[dest]
 
-        # Skip if hub not in path (path doesn't go through regional hub)
         if hub not in nodes:
             continue
 
-        # Skip if hub == dest (no arc hub→dest exists; hub IS the dest)
         if hub == dest:
             continue
 
         # Determine the effective sort level on arc hub→dest
         if sl == 'region':
-            # Region sort: hub re-sorts, dest_sort_level is the arc granularity
             eff_sort = dsl if dsl else 'market'
         elif sl == 'market':
-            # Market sort at origin: containers at market level on all arcs
             eff_sort = 'market'
         elif sl == 'sort_group':
-            # Sort_group at origin: containers at sort_group level on all arcs
             eff_sort = 'sort_group'
         else:
             eff_sort = 'market'
@@ -799,16 +650,11 @@ def _add_regional_sort_consistency_constraints(model, x, path_keys, path_od_data
     constraints = 0
     for (hub, dest), sort_paths in arc_sort_levels.items():
         if len(sort_paths) <= 1:
-            # Only one sort level option on this arc - no constraint needed
             continue
 
-        # Create binary variable for each sort level option
         sort_vars = {sl: model.NewBoolVar(f"arc_{hub}_{dest}_{sl}") for sl in sort_paths}
-
-        # Exactly one sort level must be chosen for this arc
         model.Add(sum(sort_vars.values()) == 1)
 
-        # Link path selection to sort level choice
         for sl, indices in sort_paths.items():
             for i in indices:
                 model.Add(x[i] <= sort_vars[sl])
@@ -850,17 +696,23 @@ def _calculate_processing_cost(path_data: dict, fac_lookup: pd.DataFrame,
     3. Last-mile sort at destination (unless sort_group at origin or dest_sort_level=sort_group)
     4. Delivery cost
     5. Container inefficiency penalty for sort_group (creates more partial containers)
+    6. Optional hub penalty for intermediates that aren't operationally required
 
     Container handling rules:
     - Containers are created at origin based on sort_level
     - Containers persist through crossdock operations (no break-down)
     - Containers are broken down at sort operations (regional hub for region sort)
+
+    Optional Hub Penalty Logic:
+    - If intermediate hub IS the regional hub for dest → no penalty (required for sort)
+    - If intermediate hub is NOT the regional hub → penalty (fragile consolidation)
+    - This discourages paths that rely on coincidental volume from other ODs
     """
     nodes = path_data['path_nodes']
     origin = path_data['origin']
     dest = path_data['dest']
     sl = path_data.get('sort_level', 'market')
-    dsl = path_data.get('dest_sort_level')  # Only relevant for region sort
+    dsl = path_data.get('dest_sort_level')
     volume = path_data.get('pkgs_day', 0)
 
     # 1. Injection sort at origin (always incurred)
@@ -868,7 +720,6 @@ def _calculate_processing_cost(path_data: dict, fac_lookup: pd.DataFrame,
 
     # Handle O=D case (no linehaul)
     if origin == dest:
-        # Still need last-mile sort and delivery
         return cost + cost_params.last_mile_sort_cost_per_pkg + cost_params.last_mile_delivery_cost_per_pkg
 
     # Get containers per package for crossdock cost calculation
@@ -877,28 +728,34 @@ def _calculate_processing_cost(path_data: dict, fac_lookup: pd.DataFrame,
     # Get regional hub for destination
     regional_hub = _get_regional_hub_for_dest(dest, fac_lookup)
 
-    # 2. Intermediate handling costs
+    # 2. Intermediate handling costs and optional hub penalty
     intermediates = nodes[1:-1] if len(nodes) > 2 else []
+    optional_hub_count = 0
 
     for intermediate in intermediates:
         if sl == 'region' and intermediate == regional_hub:
-            # This intermediate is the regional hub - incurs sort cost
+            # This intermediate is the regional hub - incurs sort cost, NO penalty
             cost += cost_params.intermediate_sort_cost_per_pkg
         else:
-            # This intermediate is a crossdock - incurs container handling only
+            # This intermediate is a crossdock - incurs container handling
             cost += cost_params.container_handling_cost * cpp
 
+            # Check if this is an optional (non-required) intermediate
+            # It's optional if it's NOT the regional hub for the destination
+            if intermediate != regional_hub:
+                optional_hub_count += 1
+
+    # Apply optional hub penalty for non-required intermediates
+    if optional_hub_count > 0 and cost_params.optional_hub_penalty_per_pkg > 0:
+        cost += optional_hub_count * cost_params.optional_hub_penalty_per_pkg
+
     # 3. Last-mile sort at destination
-    # Not needed if packages are already sorted to sort_group level
     needs_last_mile_sort = True
 
     if sl == 'sort_group':
-        # Origin sorted to sort_group - no last-mile sort needed
         needs_last_mile_sort = False
     elif sl == 'region' and dsl == 'sort_group':
-        # Regional hub sorted to sort_group - no last-mile sort needed
         needs_last_mile_sort = False
-    # market sort or region with dsl=market needs last-mile sort
 
     if needs_last_mile_sort:
         cost += cost_params.last_mile_sort_cost_per_pkg
@@ -907,32 +764,22 @@ def _calculate_processing_cost(path_data: dict, fac_lookup: pd.DataFrame,
     cost += cost_params.last_mile_delivery_cost_per_pkg
 
     # 5. Container inefficiency penalty for sort_group
-    # sort_group creates one container per sort group (e.g., 4 containers)
-    # market/region creates one container for the destination
-    # The extra containers waste truck space when partially filled
     if sl == 'sort_group' and dest in fac_lookup.index:
         dest_sort_groups = fac_lookup.at[dest, 'last_mile_sort_groups_count']
         if pd.notna(dest_sort_groups) and dest_sort_groups > 1:
             dest_sort_groups = int(dest_sort_groups)
 
-            # Calculate container capacity (packages per container)
             gaylord = container_params[container_params["container_type"].str.lower() == "gaylord"].iloc[0]
             container_cube = float(gaylord["usable_cube_cuft"]) * float(gaylord["pack_utilization_container"])
             pkg_cube = _weighted_pkg_cube(package_mix)
             pkgs_per_container = container_cube / pkg_cube if pkg_cube > 0 else 500
 
-            # Extra containers beyond what market sort would need
             market_containers = max(1, int(np.ceil(volume / pkgs_per_container)))
-            sg_containers = dest_sort_groups  # One per sort group
+            sg_containers = dest_sort_groups
             extra_containers = max(0, sg_containers - market_containers)
 
-            # Only penalize if sort_group creates MORE containers than market would
             if extra_containers > 0:
-                # The penalty is the cost of the extra containers
-                # multiplied by the path length (more touches = more handling)
                 num_arcs = max(1, len(nodes) - 1)
-                # Penalty per extra container: handling cost at each intermediate + truck space cost
-                # Using container_handling_cost as a proxy for the space/handling inefficiency
                 container_penalty_per = cost_params.container_handling_cost * 0.5 * num_arcs
                 cost += (extra_containers * container_penalty_per) / max(1, volume)
 
@@ -956,20 +803,26 @@ def _build_selected_paths(chosen_idx, path_od_data, path_arcs, arc_meta,
                 share = pd_['pkgs_day'] / arc_vol
                 transport += trucks * arc_meta[a]['cost_per_truck'] * share
 
-        # Calculate processing cost
+        # Calculate processing cost (includes optional hub penalty)
         proc = _calculate_processing_cost(
             pd_, fac_lookup, package_mix, container_params, cost_params
         ) * pd_['pkgs_day']
 
         total = transport + proc
 
-        # Extract node columns from path_nodes
         nodes = pd_['path_nodes']
         node_1 = nodes[0] if len(nodes) > 0 else None
         node_2 = nodes[1] if len(nodes) > 1 else None
         node_3 = nodes[2] if len(nodes) > 2 else None
         node_4 = nodes[3] if len(nodes) > 3 else None
         node_5 = nodes[4] if len(nodes) > 4 else None
+
+        # Calculate optional hub penalty component for reporting
+        dest = pd_['dest']
+        regional_hub = _get_regional_hub_for_dest(dest, fac_lookup)
+        intermediates = nodes[1:-1] if len(nodes) > 2 else []
+        optional_hub_count = sum(1 for h in intermediates if h != regional_hub)
+        optional_hub_penalty_total = optional_hub_count * cost_params.optional_hub_penalty_per_pkg * pd_['pkgs_day']
 
         data.append({
             'origin': pd_['origin'],
@@ -992,6 +845,7 @@ def _build_selected_paths(chosen_idx, path_od_data, path_arcs, arc_meta,
             'total_cost': total,
             'linehaul_cost': transport,
             'processing_cost': proc,
+            'optional_hub_penalty': optional_hub_penalty_total,
             'cost_per_pkg': safe_divide(total, pd_['pkgs_day']),
         })
 
@@ -1110,26 +964,22 @@ def _calculate_sort_point_usage(selected_paths, all_paths_df, fac_lookup, cost_p
         if fac_lookup.at[facility, 'type'].lower() not in hub_types:
             continue
 
-        # Get capacity
         cap = fac_lookup.at[facility, 'max_sort_points_capacity'] if 'max_sort_points_capacity' in fac_lookup.columns else None
         if pd.isna(cap) or cap <= 0:
             continue
         cap = int(cap)
 
-        # Get selected paths from this facility
         fac_selected = selected_paths[selected_paths['origin'] == facility]
         if fac_selected.empty:
             continue
 
-        # Calculate actual sort points used (unique destinations × sort level points)
-        dest_sort_combos = {}  # (sort_target, eff_sort) -> True
+        dest_sort_combos = {}
 
         for _, row in fac_selected.iterrows():
             dest = row['dest']
             sl = row['chosen_sort_level']
 
             if sl == 'region':
-                # Get regional hub
                 if dest in fac_lookup.index and 'regional_sort_hub' in fac_lookup.columns:
                     hub = fac_lookup.at[dest, 'regional_sort_hub']
                     if pd.isna(hub) or hub == '':
@@ -1149,7 +999,6 @@ def _calculate_sort_point_usage(selected_paths, all_paths_df, fac_lookup, cost_p
 
             dest_sort_combos[(sort_target, eff_sort)] = True
 
-        # Calculate actual points
         actual_pts = 0
         for (sort_target, eff_sort) in dest_sort_combos:
             if eff_sort == 'sort_group':
@@ -1166,7 +1015,7 @@ def _calculate_sort_point_usage(selected_paths, all_paths_df, fac_lookup, cost_p
                 pts = pts_per_dest
             actual_pts += pts
 
-        # Calculate minimum feasible (use all available region paths)
+        # Calculate minimum feasible
         fac_all = all_paths_df[all_paths_df['origin'] == facility] if all_paths_df is not None else None
         min_pts = None
 
@@ -1178,18 +1027,15 @@ def _calculate_sort_point_usage(selected_paths, all_paths_df, fac_lookup, cost_p
 
             for dest, options in dest_options.items():
                 if 'region' in options:
-                    # Can use region
                     if dest in fac_lookup.index and 'regional_sort_hub' in fac_lookup.columns:
                         hub = fac_lookup.at[dest, 'regional_sort_hub']
                         if pd.notna(hub) and hub != '' and hub != facility:
                             region_hubs.add(hub)
                         else:
-                            # Can't use region (facility IS the hub), use market
                             non_region_pts += pts_per_dest
                     else:
                         non_region_pts += pts_per_dest
                 else:
-                    # Must use market or sort_group - use market (cheaper)
                     non_region_pts += pts_per_dest
 
             min_pts = len(region_hubs) + non_region_pts

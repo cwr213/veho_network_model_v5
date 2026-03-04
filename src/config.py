@@ -45,6 +45,8 @@ class CostParameters:
     container_handling_cost: float
     sort_points_per_destination: float
     sort_setup_cost_per_point: float = 0.0
+    touch_penalty_per_pkg: float = 0.0  # DEPRECATED: Use optional_hub_penalty_per_pkg instead
+    optional_hub_penalty_per_pkg: float = 0.0  # Penalty for intermediate hubs that aren't operationally required
 
 
 @dataclass
